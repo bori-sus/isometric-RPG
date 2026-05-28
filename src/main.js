@@ -421,15 +421,17 @@ function enemyTurn(){
       e.targetX = player.x; e.targetY = player.y;
     }
 
-    // If alerted and ranged and can see player within weapon range -> shoot
-    if (e.alerted && e.weapon && e.weapon.range > 1){
-      if (canSeePlayer && cheb <= e.weapon.range){
+    // If ranged and player is in straight line AND in visibility (LOS + within vision) and within range -> shoot
+    if (e.weapon && e.weapon.range > 1){
+      const sameLine = (e.x === player.x) || (e.y === player.y);
+      if (sameLine && canSeePlayer && cheb <= e.weapon.range){
+        // ensure blue (ranged) only shoots when player is visible and in same row/column
         const dmg = Math.max(0, e.weapon.dmg - 1);
         player.hp -= dmg;
         if (player.hp <= 0) player.alive = false;
+        e.alerted = true; // confirm alerted state
         continue;
       }
-      // if cannot see player, do not shoot
     }
 
     // Movement: if have a target (spawn point or last known player pos), path towards it
