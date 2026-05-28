@@ -164,6 +164,37 @@ function findPath(sx,sy,tx,ty){
   return null;
 }
 
+// BFS to find nearest free tile not in occupied set and not the player's tile
+function findNearestFreeTileBFS(sx,sy, occupied){
+  const q = [];
+  const visited = new Set();
+  const startKey = `${sx},${sy}`;
+  q.push({x:sx,y:sy}); visited.add(startKey);
+  const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+  while (q.length){
+    const cur = q.shift();
+    for (const [dx,dy] of dirs){
+      const nx = cur.x + dx, ny = cur.y + dy;
+      const key = `${nx},${ny}`;
+      if (visited.has(key)) continue;
+      visited.add(key);
+      if (!inBounds(nx,ny)) continue;
+      if (map[ny][nx] !== 0) continue; // must be passable
+      // avoid player's tile
+      if (player && player.x === nx && player.y === ny) continue;
+      // avoid occupied positions
+      if (occupied && occupied.has(key)){
+        // still add to queue so we can search beyond occupied tiles
+        q.push({x:nx,y:ny});
+        continue;
+      }
+      // suitable free tile
+      return {x:nx,y:ny};
+    }
+  }
+  return null;
+}
+
 // helper: find a free floor tile not occupied (optionally in rooms)
 function findFreeTileAway(minDistFromPlayer = 4){
   const free = [];
@@ -439,8 +470,15 @@ function enemyTurn(){
       const path = findPath(e.x, e.y, e.targetX, e.targetY);
       if (path && path.length > 1){
         const step = path[1];
-        if (!enemies.find(o => o !== e && o.alive && o.x === step.x && o.y === step.y)){
+        // build occupied set of enemy positions (excluding current enemy)
+        const occupied = new Set(enemies.filter(o=>o.alive && o!==e).map(o=> `${o.x},${o.y}`));
+        const key = `${step.x},${step.y}`;
+        if (!occupied.has(key) && !(player && player.x === step.x && player.y === step.y)){
           e.x = step.x; e.y = step.y;
+        } else {
+          // find nearest free tile reachable
+          const free = findNearestFreeTileBFS(step.x, step.y, occupied);
+          if (free){ e.x = free.x; e.y = free.y; }
         }
       }
       // if after moving it sees the player, update alert
