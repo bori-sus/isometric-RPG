@@ -250,6 +250,7 @@ function spawnSingleEnemyAtFreeTile(){
     e.targetX = player ? player.x : pos.x;
     e.targetY = player ? player.y : pos.y;
     e.alerted = false;
+    e.vision = 2; // same as player: 5x5
     enemies.push(e);
     return e;
   } else {
@@ -258,6 +259,7 @@ function spawnSingleEnemyAtFreeTile(){
     e.targetX = player ? player.x : pos.x;
     e.targetY = player ? player.y : pos.y;
     e.alerted = false;
+    e.vision = 2;
     enemies.push(e);
     return e;
   }
@@ -333,7 +335,20 @@ function handleMoveKey(code){
   // move
   const occupied = enemies.find(e => e.alive && e.x === nx && e.y === ny);
   if (!occupied){ player.x = nx; player.y = ny; pickupItemAt(nx, ny); }
+  // after player moves, update enemies' perception immediately
+  updateEnemyPerception();
   endPlayerTurn();
+}
+
+function updateEnemyPerception(){
+  if (!player) return;
+  for (const e of enemies){
+    if (!e.alive) continue;
+    const vis = e.vision ?? 2;
+    const withinVis = Math.abs(player.x - e.x) <= vis && Math.abs(player.y - e.y) <= vis;
+    const canSee = withinVis && lineOfSight(e.x, e.y, player.x, player.y);
+    if (canSee){ e.alerted = true; e.targetX = player.x; e.targetY = player.y; }
+  }
 }
 
 function pickupItemAt(x,y){
@@ -392,38 +407,45 @@ function endPlayerTurn(){
 function enemyTurn(){
   for (const e of enemies){
     if (!e.alive) continue;
-    // If enemy is not alerted yet, it will head to its initial target (spawn/last known player pos)
-    // If it spots the player while moving, it becomes alerted and pursues directly. Ranged enemies will shoot if they can.
-    const distToPlayer = Math.abs(e.x - player.x) + Math.abs(e.y - player.y);
-    const canSeePlayer = ((e.x === player.x) || (e.y === player.y)) && lineOfSight(e.x,e.y,player.x,player.y);
-    if (!e.alerted){
-      // if while moving it sees player, become alerted
-      if (canSeePlayer){ e.alerted = true; }
+    // Perception: enemy can see player if there's line-of-sight (no walls) and within a reasonable distance
+    const dxToPlayer = player.x - e.x;
+    const dyToPlayer = player.y - e.y;
+    const cheb = Math.max(Math.abs(dxToPlayer), Math.abs(dyToPlayer));
+    // Limited vision: enemy can see only within vision radius (default 2 => 5x5)
+    const vis = e.vision ?? 2;
+    const withinVis = Math.abs(player.x - e.x) <= vis && Math.abs(player.y - e.y) <= vis;
+    const canSeePlayer = withinVis && lineOfSight(e.x, e.y, player.x, player.y);
+    if (canSeePlayer){
+      // become alerted and remember last known position
+      e.alerted = true;
+      e.targetX = player.x; e.targetY = player.y;
     }
-    // If alerted and ranged and can shoot -> shoot
+
+    // If alerted and ranged and can see player within weapon range -> shoot
     if (e.alerted && e.weapon && e.weapon.range > 1){
-      const cheb = Math.max(Math.abs(e.x - player.x), Math.abs(e.y - player.y));
-      const sameLine = (e.x === player.x) || (e.y === player.y);
-      if (sameLine && cheb <= e.weapon.range && lineOfSight(e.x,e.y,player.x,player.y)){
+      if (canSeePlayer && cheb <= e.weapon.range){
         const dmg = Math.max(0, e.weapon.dmg - 1);
         player.hp -= dmg;
         if (player.hp <= 0) player.alive = false;
         continue;
       }
+      // if cannot see player, do not shoot
     }
-    // If not alerted, attempt to move towards targetX/targetY (initial spawn target)
-    if (!e.alerted && (e.targetX !== undefined && (e.x !== e.targetX || e.y !== e.targetY))){
-      // Use A* to move along passable tiles towards the target
+
+    // Movement: if have a target (spawn point or last known player pos), path towards it
+    if (e.targetX !== undefined && (e.x !== e.targetX || e.y !== e.targetY)){
       const path = findPath(e.x, e.y, e.targetX, e.targetY);
       if (path && path.length > 1){
-        // move one step along path
         const step = path[1];
         if (!enemies.find(o => o !== e && o.alive && o.x === step.x && o.y === step.y)){
           e.x = step.x; e.y = step.y;
         }
       }
-      // after moving, if it sees player, become alerted
-      if (((e.x === player.x) || (e.y === player.y)) && lineOfSight(e.x,e.y,player.x,player.y)) e.alerted = true;
+      // if after moving it sees the player, update alert
+      if (lineOfSight(e.x, e.y, player.x, player.y)){
+        e.alerted = true;
+        e.targetX = player.x; e.targetY = player.y;
+      }
       continue;
     }
     // melee if adjacent
@@ -482,10 +504,9 @@ function render(){
   const minY = Math.max(0, player.y - viewRadius);
   const maxY = Math.min(MAP_H-1, player.y + viewRadius);
   // camera should center on player but constrained so that only these tiles are visible
-  // compute cam so cell centers are arranged in canvas
-  const centerIso = iso(player.x, player.y);
-  const cam = { x: centerIso.x - w/2, y: centerIso.y - h/2 };
-  const playerIso = iso(player.x, player.y); const cam = { x: playerIso.x - w/2, y: playerIso.y - h/2 };
+  // compute camera centered on player
+  const playerIso = iso(player.x, player.y);
+  const cam = { x: playerIso.x - w/2, y: playerIso.y - h/2 };
   // tiles (only visible window)
   const tiles = [];
   for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) tiles.push({x,y,type:map[y][x]});
@@ -537,9 +558,13 @@ function showDebugOverlay(){
     pre.style.color = '#dfefff';
     pre.style.padding = '8px';
     pre.style.marginTop = '8px';
-    const floor = map.flat().filter(v=>v===0).length;
-    const wall = map.flat().filter(v=>v===1).length;
-    const door = map.flat().filter(v=>v===2).length;
+    let floor = 0, wall = 0, door = 0;
+    for (let yy = 0; yy < MAP_H; yy++){
+      for (let xx = 0; xx < MAP_W; xx++){
+        const v = map[yy][xx];
+        if (v === 0) floor++; else if (v === 1) wall++; else if (v === 2) door++;
+      }
+    }
     const roomCount = rooms.length;
     const itemsCount = items.length;
     const enemiesCount = enemies.length;
