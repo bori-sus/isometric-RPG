@@ -39,7 +39,6 @@ function initDungeon(roomCount = 12){
   // start with all walls
   map = Array.from({length: MAP_H}, ()=> Array.from({length: MAP_W}, ()=> 1));
   rooms = [];
-  doors = [];
 
   let attempts = 0;
   while (rooms.length < roomCount && attempts < 2000){
@@ -79,6 +78,16 @@ function initDungeon(roomCount = 12){
 
   // (No doors: corridors are open passages)
 
+  // ensure at least one room exists; if not, create a central room
+  if (rooms.length === 0){
+    const w = Math.min(5, MAP_W-4);
+    const h = Math.min(5, MAP_H-4);
+    const x = Math.floor((MAP_W - w)/2);
+    const y = Math.floor((MAP_H - h)/2);
+    const room = { x, y, w, h, cx: Math.floor(x + w/2), cy: Math.floor(y + h/2) };
+    rooms.push(room);
+    for (let ry = y; ry < y + h; ry++) for (let rx = x; rx < x + w; rx++) map[ry][rx] = 0;
+  }
   // ensure player start is inside first room
   if (rooms.length > 0){ const r = rooms[0]; const sx = Math.floor(r.x + r.w/2); const sy = Math.floor(r.y + r.h/2); map[sy][sx] = 0; }
 }
@@ -130,6 +139,7 @@ function spawnItemsInRooms(keysCount = 3, pistolsCount = 2, potionsCount = 2){
   for (const r of rooms){
     for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) allRoomTiles.push({x,y});
   }
+  if (allRoomTiles.length === 0) return; // nothing to place into
   function place(type){
     let tries = 0;
     while (tries++ < 500){
@@ -188,11 +198,18 @@ function spawnSingleEnemyAtFreeTile(){
   if (isRanged){
     const e = new Entity(pos.x,pos.y,{hp:5,maxHp:5,color:'#4a7bf3',char:'r'});
     e.weapon = { name: 'Rifle', dmg: 2, range: 5 };
+    // initial target = player's spawn location (current player position)
+    e.targetX = player ? player.x : pos.x;
+    e.targetY = player ? player.y : pos.y;
+    e.alerted = false;
     enemies.push(e);
     return e;
   } else {
     const e = new Entity(pos.x,pos.y,{hp:4,maxHp:4,color:'#d14a4a',char:'g'});
     e.weapon = { name: 'Claws', dmg: 2, range: 1 };
+    e.targetX = player ? player.x : pos.x;
+    e.targetY = player ? player.y : pos.y;
+    e.alerted = false;
     enemies.push(e);
     return e;
   }
@@ -232,6 +249,12 @@ window.addEventListener('keydown', (e)=>{
     handleMoveKey(e.code);
   }
 });
+
+// Global error handlers to show errors on the UI overlay (helps debugging in-browser)
+window.addEventListener('error', (ev)=>{
+  try{ const el = document.getElementById('ui'); if (el){ const pre = document.createElement('pre'); pre.style.background='rgba(128,0,0,0.7)'; pre.style.color='#fff'; pre.style.padding='8px'; pre.textContent = `Error: ${ev.message} at ${ev.filename}:${ev.lineno}`; el.appendChild(pre);} }catch(e){}
+});
+window.addEventListener('unhandledrejection', (ev)=>{ try{ const el = document.getElementById('ui'); if (el){ const pre = document.createElement('pre'); pre.style.background='rgba(128,0,0,0.7)'; pre.style.color='#fff'; pre.style.padding='8px'; pre.textContent = `UnhandledRejection: ${ev.reason}`; el.appendChild(pre);} }catch(e){} });
 
 function restart(){
   playerTurnCounter = 0;
@@ -321,18 +344,42 @@ function endPlayerTurn(){
 function enemyTurn(){
   for (const e of enemies){
     if (!e.alive) continue;
-    // ranged try shoot
-    if (e.weapon && e.weapon.range > 1){
-      // ranged enemies only shoot if player is exactly on same row or same column (straight line)
-      const sameLine = (e.x === player.x) || (e.y === player.y);
+    // If enemy is not alerted yet, it will head to its initial target (spawn/last known player pos)
+    // If it spots the player while moving, it becomes alerted and pursues directly. Ranged enemies will shoot if they can.
+    const distToPlayer = Math.abs(e.x - player.x) + Math.abs(e.y - player.y);
+    const canSeePlayer = ((e.x === player.x) || (e.y === player.y)) && lineOfSight(e.x,e.y,player.x,player.y);
+    if (!e.alerted){
+      // if while moving it sees player, become alerted
+      if (canSeePlayer){ e.alerted = true; }
+    }
+    // If alerted and ranged and can shoot -> shoot
+    if (e.alerted && e.weapon && e.weapon.range > 1){
       const cheb = Math.max(Math.abs(e.x - player.x), Math.abs(e.y - player.y));
+      const sameLine = (e.x === player.x) || (e.y === player.y);
       if (sameLine && cheb <= e.weapon.range && lineOfSight(e.x,e.y,player.x,player.y)){
-        // enemies deal 1 less damage
         const dmg = Math.max(0, e.weapon.dmg - 1);
         player.hp -= dmg;
         if (player.hp <= 0) player.alive = false;
         continue;
       }
+    }
+    // If not alerted, attempt to move towards targetX/targetY (initial spawn target)
+    if (!e.alerted && (e.targetX !== undefined && (e.x !== e.targetX || e.y !== e.targetY))){
+      const dx = e.targetX > e.x ? 1 : (e.targetX < e.x ? -1 : 0);
+      const dy = e.targetY > e.y ? 1 : (e.targetY < e.y ? -1 : 0);
+      const tries = [];
+      if (dx !== 0) tries.push([e.x + dx, e.y]);
+      if (dy !== 0) tries.push([e.x, e.y + dy]);
+      for (const [nx, ny] of tries){
+        if (nx < 0 || nx >= MAP_W || ny < 0 || ny >= MAP_H) continue;
+        if (map[ny][nx] === 1) continue;
+        if (player.x === nx && player.y === ny) continue;
+        if (enemies.find(o => o !== e && o.alive && o.x === nx && o.y === ny)) continue;
+        e.x = nx; e.y = ny; break;
+      }
+      // after moving, if it sees player, become alerted
+      if (((e.x === player.x) || (e.y === player.y)) && lineOfSight(e.x,e.y,player.x,player.y)) e.alerted = true;
+      continue;
     }
     // melee if adjacent
     const dman = Math.abs(e.x - player.x) + Math.abs(e.y - player.y);
@@ -399,7 +446,7 @@ function render(){
   ctx.fillText(`HP: ${player.hp}/${player.maxHp}   Weapon: ${weaponLabel}`, 18, h - 104);
   ctx.fillText(`Turn: ${turn}   Enemies: ${enemies.filter(e=>e.alive).length}/${MAX_ACTIVE_ENEMIES}`, 18, h - 84);
   const toNext = WAVE_INTERVAL - (playerTurnCounter % WAVE_INTERVAL || WAVE_INTERVAL); ctx.fillText(`Turns: ${playerTurnCounter}   Next wave in: ${toNext}`, 18, h - 64);
-  ctx.fillText('Controls: WASD/Arrows move/attack, Space shoot, R restart', 18, h - 44);
+  ctx.fillText('Controls: WASD/Arrows move/attack, H to shoot (pistol), R restart', 18, h - 44);
   // messages
   if (!player.alive){ ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(w/2 - 200, h/2 - 40, 400, 80); ctx.fillStyle = '#fff'; ctx.font = '22px sans-serif'; ctx.fillText('You died. Press R to restart.', w/2 - 170, h/2); }
   else if (enemies.filter(e=>e.alive).length === 0){ ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(w/2 - 220, h/2 - 40, 440, 80); ctx.fillStyle = '#fff'; ctx.font = '22px sans-serif'; ctx.fillText('All enemies slain! Press R to restart.', w/2 - 210, h/2); }
@@ -407,9 +454,53 @@ function render(){
 
 function loop(){ render(); requestAnimationFrame(loop); }
 
-// initial setup
+// initial setup with error reporting to UI overlay
+function showErrorOverlay(msg){
+  try{
+    const el = document.getElementById('ui');
+    if (el){
+      const pre = document.createElement('pre');
+      pre.style.background = 'rgba(0,0,0,0.7)';
+      pre.style.color = '#ffdddd';
+      pre.style.padding = '8px';
+      pre.style.marginTop = '8px';
+      pre.textContent = msg;
+      el.appendChild(pre);
+    }
+  }catch(e){ /* ignore */ }
+}
+
+function showDebugOverlay(){
+  try{
+    const el = document.getElementById('ui');
+    if (!el) return;
+    // remove old debug if present
+    const old = document.getElementById('debug-info'); if (old) old.remove();
+    const pre = document.createElement('pre');
+    pre.id = 'debug-info';
+    pre.style.background = 'rgba(0,0,0,0.45)';
+    pre.style.color = '#dfefff';
+    pre.style.padding = '8px';
+    pre.style.marginTop = '8px';
+    const floor = map.flat().filter(v=>v===0).length;
+    const wall = map.flat().filter(v=>v===1).length;
+    const door = map.flat().filter(v=>v===2).length;
+    const roomCount = rooms.length;
+    const itemsCount = items.length;
+    const enemiesCount = enemies.length;
+    pre.textContent = `rooms: ${roomCount}\nfloor tiles: ${floor}\nwalls: ${wall}\ndoors: ${door}\nitems: ${itemsCount}\nenemies: ${enemiesCount}\nplayer: ${player ? `${player.x},${player.y}` : 'none'}`;
+    el.appendChild(pre);
+  }catch(e){}
+}
+
+try{
   initDungeon(12);
-spawnItemsInRooms(4,2,3);
-spawnInitialPlayer();
-spawnEnemiesInitial();
-loop();
+  spawnItemsInRooms(4,2,3);
+  spawnInitialPlayer();
+  spawnEnemiesInitial();
+  loop();
+  showDebugOverlay();
+}catch(err){
+  console.error('Initialization error', err);
+  showErrorOverlay(String(err.stack || err));
+}
