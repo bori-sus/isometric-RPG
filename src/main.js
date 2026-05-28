@@ -116,6 +116,54 @@ function carveLine(x1,y1,x2,y2){
   }
 }
 
+function inBounds(x,y){ return x >= 0 && x < MAP_W && y >= 0 && y < MAP_H; }
+
+function isPassable(x,y){ return inBounds(x,y) && map[y][x] === 0; }
+
+// A* pathfinding on grid (4-directional). Returns array of {x,y} from start to target inclusive, or null.
+function findPath(sx,sy,tx,ty){
+  if (!inBounds(sx,sy) || !inBounds(tx,ty)) return null;
+  // if target not passable, still allow if target equals player's position (player stands on floor)
+  if (!isPassable(tx,ty)) return null;
+  if (sx === tx && sy === ty) return [{x:sx,y:sy}];
+  const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+  const g = Array.from({length: MAP_H}, ()=> Array.from({length: MAP_W}, ()=> Infinity));
+  const f = Array.from({length: MAP_H}, ()=> Array.from({length: MAP_W}, ()=> Infinity));
+  const came = Array.from({length: MAP_H}, ()=> Array.from({length: MAP_W}, ()=> null));
+  function h(x,y){ return Math.abs(x - tx) + Math.abs(y - ty); }
+  const open = [];
+  g[sy][sx] = 0; f[sy][sx] = h(sx,sy);
+  open.push({x:sx,y:sy,f:f[sy][sx]});
+  while (open.length){
+    // pop lowest f
+    let bestIdx = 0;
+    for (let i=1;i<open.length;i++) if (open[i].f < open[bestIdx].f) bestIdx = i;
+    const node = open.splice(bestIdx,1)[0];
+    const {x,y} = node;
+    if (x === tx && y === ty){
+      // reconstruct path
+      const path = [];
+      let cx = x, cy = y;
+      while (cx !== null){ path.push({x:cx,y:cy}); const p = came[cy][cx]; if (!p) break; cx = p.x; cy = p.y; }
+      return path.reverse();
+    }
+    for (const [dx,dy] of dirs){
+      const nx = x + dx, ny = y + dy;
+      if (!inBounds(nx,ny)) continue;
+      if (!isPassable(nx,ny) && !(nx === tx && ny === ty)) continue;
+      const tentative = g[y][x] + 1;
+      if (tentative < g[ny][nx]){
+        came[ny][nx] = {x,y};
+        g[ny][nx] = tentative;
+        f[ny][nx] = tentative + h(nx,ny);
+        // add to open if not already
+        if (!open.some(n=>n.x===nx && n.y===ny)) open.push({x:nx,y:ny,f:f[ny][nx]});
+      }
+    }
+  }
+  return null;
+}
+
 // helper: find a free floor tile not occupied (optionally in rooms)
 function findFreeTileAway(minDistFromPlayer = 4){
   const free = [];
@@ -365,17 +413,14 @@ function enemyTurn(){
     }
     // If not alerted, attempt to move towards targetX/targetY (initial spawn target)
     if (!e.alerted && (e.targetX !== undefined && (e.x !== e.targetX || e.y !== e.targetY))){
-      const dx = e.targetX > e.x ? 1 : (e.targetX < e.x ? -1 : 0);
-      const dy = e.targetY > e.y ? 1 : (e.targetY < e.y ? -1 : 0);
-      const tries = [];
-      if (dx !== 0) tries.push([e.x + dx, e.y]);
-      if (dy !== 0) tries.push([e.x, e.y + dy]);
-      for (const [nx, ny] of tries){
-        if (nx < 0 || nx >= MAP_W || ny < 0 || ny >= MAP_H) continue;
-        if (map[ny][nx] === 1) continue;
-        if (player.x === nx && player.y === ny) continue;
-        if (enemies.find(o => o !== e && o.alive && o.x === nx && o.y === ny)) continue;
-        e.x = nx; e.y = ny; break;
+      // Use A* to move along passable tiles towards the target
+      const path = findPath(e.x, e.y, e.targetX, e.targetY);
+      if (path && path.length > 1){
+        // move one step along path
+        const step = path[1];
+        if (!enemies.find(o => o !== e && o.alive && o.x === step.x && o.y === step.y)){
+          e.x = step.x; e.y = step.y;
+        }
       }
       // after moving, if it sees player, become alerted
       if (((e.x === player.x) || (e.y === player.y)) && lineOfSight(e.x,e.y,player.x,player.y)) e.alerted = true;
@@ -430,16 +475,26 @@ function drawEntity(ent, cam){
 function render(){
   if (!player) return;
   const w = canvas.width / DPR, h = canvas.height / DPR; ctx.clearRect(0,0,w,h);
+  // view window: 5x5 centered on player
+  const viewRadius = 2; // radius in tiles (2 => 5x5)
+  const minX = Math.max(0, player.x - viewRadius);
+  const maxX = Math.min(MAP_W-1, player.x + viewRadius);
+  const minY = Math.max(0, player.y - viewRadius);
+  const maxY = Math.min(MAP_H-1, player.y + viewRadius);
+  // camera should center on player but constrained so that only these tiles are visible
+  // compute cam so cell centers are arranged in canvas
+  const centerIso = iso(player.x, player.y);
+  const cam = { x: centerIso.x - w/2, y: centerIso.y - h/2 };
   const playerIso = iso(player.x, player.y); const cam = { x: playerIso.x - w/2, y: playerIso.y - h/2 };
-  // tiles
+  // tiles (only visible window)
   const tiles = [];
-  for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) tiles.push({x,y,type:map[y][x]});
+  for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) tiles.push({x,y,type:map[y][x]});
   tiles.sort((a,b)=> (a.x+a.y) - (b.x+b.y));
   for (const t of tiles){ const isoP = iso(t.x,t.y); drawTile(isoP.x - cam.x, isoP.y - cam.y, t.type); }
-  // items
-  const itemsSorted = items.slice().sort((a,b)=> (a.x+a.y) - (b.x+b.y)); for (const it of itemsSorted) drawItem(it, cam);
-  // entities
-  const ents = [...enemies.filter(e=>e.alive), player].sort((a,b)=> (a.x+a.y) - (b.x+b.y)); for (const e of ents) drawEntity(e, cam);
+  // items (visible)
+  const itemsSorted = items.filter(it=> it.x >= minX && it.x <= maxX && it.y >= minY && it.y <= maxY).slice().sort((a,b)=> (a.x+a.y) - (b.x+b.y)); for (const it of itemsSorted) drawItem(it, cam);
+  // entities (visible only)
+  const ents = [...enemies.filter(e=>e.alive && e.x >= minX && e.x <= maxX && e.y >= minY && e.y <= maxY), player].sort((a,b)=> (a.x+a.y) - (b.x+b.y)); for (const e of ents) drawEntity(e, cam);
   // HUD
   ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(10, h - 130, 520, 120);
   ctx.fillStyle = '#fff'; ctx.font = '13px sans-serif'; const weaponLabel = player.weapon ? `${player.weapon.name}${player.weapon.ammo!==undefined ? ` (ammo:${player.weapon.ammo})` : ''}` : 'None';
