@@ -28,7 +28,6 @@ const WAVE_MAX = 2;
 // world state
 let map = [];
 let rooms = [];
-let doors = [];
 let items = [];
 let enemies = [];
 
@@ -78,36 +77,7 @@ function initDungeon(roomCount = 12){
     carveCorridor(a.cx, a.cy, b.cx, b.cy);
   }
 
-  // identify corridor tiles (floors that are not room interiors)
-  const corridorTiles = [];
-  for (let y = 0; y < MAP_H; y++){
-    for (let x = 0; x < MAP_W; x++){
-      if (map[y][x] === 0 && !roomMask[y][x]) corridorTiles.push({x,y});
-    }
-  }
-
-  // place doors only in corridors (avoid blocking immediate start area)
-  const doorsToPlace = Math.min(6, Math.max(1, Math.floor(corridorTiles.length / 8)));
-  const startRoom = rooms[0];
-  const startCenter = startRoom ? { x: Math.floor(startRoom.x + startRoom.w/2), y: Math.floor(startRoom.y + startRoom.h/2) } : {x:0,y:0};
-  let placed = 0;
-  const used = new Set();
-  let safety = 0;
-  while (placed < doorsToPlace && safety < corridorTiles.length * 3){
-    safety++;
-    if (corridorTiles.length === 0) break;
-    const idx = randInt(0, corridorTiles.length - 1);
-    if (used.has(idx)) continue;
-    used.add(idx);
-    const t = corridorTiles[idx];
-    // avoid too close to start
-    const dist = Math.abs(t.x - startCenter.x) + Math.abs(t.y - startCenter.y);
-    if (dist < 3) continue;
-    // place door
-    map[t.y][t.x] = 2; // closed door in corridor
-    doors.push({ x: t.x, y: t.y });
-    placed++;
-  }
+  // (No doors: corridors are open passages)
 
   // ensure player start is inside first room
   if (rooms.length > 0){ const r = rooms[0]; const sx = Math.floor(r.x + r.w/2); const sy = Math.floor(r.y + r.h/2); map[sy][sx] = 0; }
@@ -171,7 +141,8 @@ function spawnItemsInRooms(keysCount = 3, pistolsCount = 2, potionsCount = 2){
       return;
     }
   }
-  for (let i=0;i<keysCount;i++) place('key');
+  // keys removed from game - do not place them
+  // for (let i=0;i<keysCount;i++) place('key');
   for (let i=0;i<pistolsCount;i++) place('pistol');
   for (let i=0;i<potionsCount;i++) place('potion');
 }
@@ -199,6 +170,7 @@ function spawnInitialPlayer(){
   const sy = Math.floor(r.y + r.h/2);
   player = new Entity(sx, sy, {hp:10, maxHp:10, color:'#ffcc33', char:'@'});
   player.weapon = { name: 'Sword', dmg: 3, range: 1 };
+  // keys removed
   player.keys = 0;
   player.facing = {dx: 0, dy: 1};
 }
@@ -282,9 +254,8 @@ function handleMoveKey(code){
   if (nx < 0 || nx >= MAP_W || ny < 0 || ny >= MAP_H) return;
   const tile = map[ny][nx];
   if (tile === 1) return; // wall
-  if (tile === 2){ // door
-    if (player.keys > 0){ player.keys -= 1; map[ny][nx] = 0; } else { return; }
-  }
+  // no doors anymore
+  if (tile === 2) return;
   // attack enemy on that tile
   const target = enemies.find(e => e.alive && e.x === nx && e.y === ny);
   if (target){ attack(player, target); endPlayerTurn(); return; }
@@ -298,13 +269,16 @@ function pickupItemAt(x,y){
   const idx = items.findIndex(it => it.x === x && it.y === y);
   if (idx === -1) return;
   const it = items.splice(idx,1)[0];
-  if (it.type === 'key'){ player.keys = (player.keys || 0) + 1; }
-  else if (it.type === 'pistol'){
-    const pistol = { name: 'Pistol', dmg: 4, range: 4, ammo: 6 };
-    if (player.weapon && player.weapon.name === 'Pistol'){ player.weapon.ammo = (player.weapon.ammo || 0) + pistol.ammo; }
-    else { player.weapon = pistol; }
-  } else if (it.type === 'potion'){
+  if (it.type === 'potion'){
     player.hp = Math.min(player.maxHp, player.hp + 6);
+  } else if (it.type === 'pistol'){
+    // give player pistol with ammo
+    const pistol = { name: 'Pistol', dmg: 6, range: 4, ammo: 6 };
+    if (player.weapon && player.weapon.name === 'Pistol'){
+      player.weapon.ammo = (player.weapon.ammo || 0) + pistol.ammo;
+    } else {
+      player.weapon = pistol;
+    }
   }
 }
 
@@ -316,7 +290,8 @@ function attack(attacker, defender){
 }
 
 function attemptRangedFire(){
-  if (!player.weapon || player.weapon.range <= 1) return;
+  // H key attack: pistol deals damage directly to first target in line; pistol damage set higher above
+  if (!player.weapon || player.weapon.name !== 'Pistol') return;
   if (player.weapon.ammo !== undefined && player.weapon.ammo <= 0) return;
   const dx = player.facing.dx, dy = player.facing.dy;
   if (dx === 0 && dy === 0) return;
@@ -352,7 +327,9 @@ function enemyTurn(){
       const sameLine = (e.x === player.x) || (e.y === player.y);
       const cheb = Math.max(Math.abs(e.x - player.x), Math.abs(e.y - player.y));
       if (sameLine && cheb <= e.weapon.range && lineOfSight(e.x,e.y,player.x,player.y)){
-        player.hp -= e.weapon.dmg;
+        // enemies deal 1 less damage
+        const dmg = Math.max(0, e.weapon.dmg - 1);
+        player.hp -= dmg;
         if (player.hp <= 0) player.alive = false;
         continue;
       }
@@ -391,7 +368,7 @@ function drawTile(cx, cy, type){
 
 function drawItem(it, cam){
   const isoP = iso(it.x, it.y); const sx = isoP.x - cam.x; const sy = isoP.y - cam.y;
-  if (it.type === 'key'){ ctx.fillStyle = '#ffd54f'; ctx.beginPath(); ctx.moveTo(sx, sy - 6); ctx.lineTo(sx + 6, sy); ctx.lineTo(sx, sy + 6); ctx.lineTo(sx - 6, sy); ctx.closePath(); ctx.fill(); ctx.strokeStyle = '#00000022'; ctx.stroke(); }
+  if (it.type === 'key'){ /* keys removed visually */ }
   else if (it.type === 'pistol'){ ctx.fillStyle = '#bdbdbd'; ctx.fillRect(sx - 8, sy - 6, 16, 6); ctx.fillStyle = '#666'; ctx.fillRect(sx + 6, sy - 4, 6, 4); }
   else if (it.type === 'potion'){ ctx.fillStyle = '#57c6a7'; ctx.beginPath(); ctx.ellipse(sx, sy - 2, 6, 8, 0, 0, Math.PI*2); ctx.fill(); ctx.fillStyle = '#00000022'; ctx.fillRect(sx - 2, sy + 2, 4, 4); }
 }
@@ -419,7 +396,7 @@ function render(){
   // HUD
   ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(10, h - 130, 520, 120);
   ctx.fillStyle = '#fff'; ctx.font = '13px sans-serif'; const weaponLabel = player.weapon ? `${player.weapon.name}${player.weapon.ammo!==undefined ? ` (ammo:${player.weapon.ammo})` : ''}` : 'None';
-  ctx.fillText(`HP: ${player.hp}/${player.maxHp}   Keys: ${player.keys || 0}   Weapon: ${weaponLabel}`, 18, h - 104);
+  ctx.fillText(`HP: ${player.hp}/${player.maxHp}   Weapon: ${weaponLabel}`, 18, h - 104);
   ctx.fillText(`Turn: ${turn}   Enemies: ${enemies.filter(e=>e.alive).length}/${MAX_ACTIVE_ENEMIES}`, 18, h - 84);
   const toNext = WAVE_INTERVAL - (playerTurnCounter % WAVE_INTERVAL || WAVE_INTERVAL); ctx.fillText(`Turns: ${playerTurnCounter}   Next wave in: ${toNext}`, 18, h - 64);
   ctx.fillText('Controls: WASD/Arrows move/attack, Space shoot, R restart', 18, h - 44);
