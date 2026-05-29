@@ -20,7 +20,7 @@ const MAP_H = 20;
 const TILE_W = 64;
 const TILE_H = 32;
 
-const MAX_ACTIVE_ENEMIES = 4;
+let MAX_ACTIVE_ENEMIES = 4;
 const WAVE_INTERVAL = 15; // player turns per wave
 const WAVE_MIN = 1;
 const WAVE_MAX = 2;
@@ -32,8 +32,32 @@ let items = [];
 let enemies = [];
 
 let playerTurnCounter = 0;
+let level = 1;
+let victoryPending = false;
+let lastEnemySpawnTurn = 0;
+let aimMode = false;
+let aimDir = null;
+let aimKey = null;
+let noGunFlashFrames = 0;
+let currentTheme = { wall: '#7d7d7d', floor: '#2e8b57' };
+const THEMES = [
+  { wall: '#7d7d7d', floor: '#2e8b57' },   // классический
+  { wall: '#2d5a27', floor: '#1a4a1a' },    // тёмно-зелёный
+  { wall: '#8bc34a', floor: '#689f38' },    // салатовый
+  { wall: '#e8e0d4', floor: '#d4c8b4' },    // белый
+  { wall: '#64b5f6', floor: '#42a5f5' },    // голубой
+  { wall: '#ffd700', floor: '#d4a017' },    // золотой
+  { wall: '#b8860b', floor: '#8b6508' },    // тёмно-золотой
+  { wall: '#1a2e1a', floor: '#0d1f0d' },    // чёрно-зелёный
+  { wall: '#7b1fa2', floor: '#4a148c' },    // фиолетовый
+];
+let hasRadar = false;
 
 function randInt(min, max){ return Math.floor(Math.random() * (max - min + 1)) + min; }
+
+function pickRandomTheme(){
+  currentTheme = THEMES[randInt(0, THEMES.length - 1)];
+}
 
 function initDungeon(roomCount = 12){
   // start with all walls
@@ -234,6 +258,7 @@ function spawnItemsInRooms(keysCount = 3, pistolsCount = 2, potionsCount = 2){
   // for (let i=0;i<keysCount;i++) place('key');
   for (let i=0;i<pistolsCount;i++) place('pistol');
   for (let i=0;i<potionsCount;i++) place('potion');
+  if (!hasRadar) place('radar');
 }
 
 // Entities
@@ -300,6 +325,8 @@ function spawnWaveIfNeeded(){
   const alive = enemies.filter(e => e.alive).length;
   const remain = MAX_ACTIVE_ENEMIES - alive;
   if (remain <= 0) return;
+  if (playerTurnCounter - lastEnemySpawnTurn < 30) return;
+  lastEnemySpawnTurn = playerTurnCounter;
   const toSpawn = Math.min(remain, randInt(WAVE_MIN, WAVE_MAX));
   for (let i=0;i<toSpawn;i++) spawnSingleEnemyAtFreeTile();
 }
@@ -321,13 +348,38 @@ function lineOfSight(x0,y0,x1,y1){
 }
 
 // input
+const AIM_ARROWS = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+const AIM_DIRS = { ArrowUp: {dx:0,dy:-1}, ArrowDown: {dx:0,dy:1}, ArrowLeft: {dx:-1,dy:0}, ArrowRight: {dx:1,dy:0} };
+
 window.addEventListener('keydown', (e)=>{
   if (!player) return;
   if (e.code === 'KeyR'){ restart(); return; }
+  // Shift toggles aim mode (or flash cross if no gun)
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight'){
+    const hasGun = player.weapon && player.weapon.name === 'Pistol' && player.weapon.ammo > 0;
+    if (hasGun){ aimMode = true; aimDir = null; aimKey = null; }
+    else { noGunFlashFrames = 48; }
+    return;
+  }
   if (turn !== 'player') return;
   if (e.code === 'KeyH'){ attemptRangedFire(); return; }
+  if (aimMode && AIM_ARROWS.includes(e.code)){
+    aimDir = AIM_DIRS[e.code];
+    aimKey = e.code;
+    return;
+  }
+  if (aimMode) return; // suppress all movement keys while aiming
   if (['ArrowUp','KeyW','ArrowDown','KeyS','ArrowLeft','KeyA','ArrowRight','KeyD'].includes(e.code)){
     handleMoveKey(e.code);
+  }
+});
+
+window.addEventListener('keyup', (e)=>{
+  if (!player) return;
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight'){ aimMode = false; aimDir = null; aimKey = null; return; }
+  if (aimMode && AIM_ARROWS.includes(e.code) && e.code === aimKey && aimDir){
+    performAimFire(aimDir.dx, aimDir.dy);
+    aimDir = null; aimKey = null;
   }
 });
 
@@ -338,7 +390,28 @@ window.addEventListener('error', (ev)=>{
 window.addEventListener('unhandledrejection', (ev)=>{ try{ const el = document.getElementById('ui'); if (el){ const pre = document.createElement('pre'); pre.style.background='rgba(128,0,0,0.7)'; pre.style.color='#fff'; pre.style.padding='8px'; pre.textContent = `UnhandledRejection: ${ev.reason}`; el.appendChild(pre);} }catch(e){} });
 
 function restart(){
+  level = 1;
+  MAX_ACTIVE_ENEMIES = 4;
+  pickRandomTheme();
+  hasRadar = false;
+  victoryPending = false;
+  lastEnemySpawnTurn = 0;
+  aimMode = false; aimDir = null; aimKey = null; noGunFlashFrames = 0;
   playerTurnCounter = 0;
+  initDungeon(12);
+  spawnItemsInRooms(4,2,3);
+  spawnInitialPlayer();
+  spawnEnemiesInitial();
+  turn = 'player';
+}
+
+function nextLevel(){
+  level++;
+  MAX_ACTIVE_ENEMIES = 4 + (level - 1);
+  pickRandomTheme();
+  victoryPending = false;
+  lastEnemySpawnTurn = playerTurnCounter;
+  aimMode = false; aimDir = null; aimKey = null; noGunFlashFrames = 0;
   initDungeon(12);
   spawnItemsInRooms(4,2,3);
   spawnInitialPlayer();
@@ -396,6 +469,8 @@ function pickupItemAt(x,y){
     } else {
       player.weapon = pistol;
     }
+  } else if (it.type === 'radar'){
+    hasRadar = true;
   }
 }
 
@@ -406,21 +481,28 @@ function attack(attacker, defender){
   if (defender.hp <= 0) defender.alive = false;
 }
 
-function attemptRangedFire(){
-  // H key attack: pistol deals damage directly to first target in line; pistol damage set higher above
-  if (!player.weapon || player.weapon.name !== 'Pistol') return;
-  if (player.weapon.ammo !== undefined && player.weapon.ammo <= 0) return;
-  const dx = player.facing.dx, dy = player.facing.dy;
-  if (dx === 0 && dy === 0) return;
+function shootInDirection(dx, dy){
+  if (!player.weapon || player.weapon.name !== 'Pistol') return false;
+  if (player.weapon.ammo !== undefined && player.weapon.ammo <= 0) return false;
+  if (dx === 0 && dy === 0) return false;
   for (let step = 1; step <= player.weapon.range; step++){
     const tx = player.x + dx*step, ty = player.y + dy*step;
     if (tx < 0 || tx >= MAP_W || ty < 0 || ty >= MAP_H) break;
     if (map[ty][tx] === 1 || map[ty][tx] === 2) break;
     const hit = enemies.find(e => e.alive && e.x === tx && e.y === ty);
-    if (hit){ hit.hp -= player.weapon.dmg; if (hit.hp <= 0) hit.alive = false; break; }
+    if (hit){ const dmg = step <= 2 ? 4 : 6; hit.hp -= dmg; if (hit.hp <= 0) hit.alive = false; break; }
   }
   if (player.weapon.ammo !== undefined){ player.weapon.ammo -= 1; if (player.weapon.ammo <= 0) player.weapon = { name: 'Sword', dmg: 3, range: 1 }; }
-  endPlayerTurn();
+  return true;
+}
+
+function attemptRangedFire(){
+  const dx = player.facing.dx, dy = player.facing.dy;
+  if (shootInDirection(dx, dy)) endPlayerTurn();
+}
+
+function performAimFire(dx, dy){
+  if (shootInDirection(dx, dy)) endPlayerTurn();
 }
 
 let turn = 'player';
@@ -513,9 +595,9 @@ function iso(x,y){ return { x: (x - y) * (TILE_W/2), y: (x + y) * (TILE_H/2) }; 
 
 function drawTile(cx, cy, type){
   ctx.beginPath(); ctx.moveTo(cx, cy - TILE_H/2); ctx.lineTo(cx + TILE_W/2, cy); ctx.lineTo(cx, cy + TILE_H/2); ctx.lineTo(cx - TILE_W/2, cy); ctx.closePath();
-  if (type === 1) ctx.fillStyle = '#7d7d7d';
+  if (type === 1) ctx.fillStyle = currentTheme.wall;
   else if (type === 2) ctx.fillStyle = '#c08b57';
-  else ctx.fillStyle = '#2e8b57';
+  else ctx.fillStyle = currentTheme.floor;
   ctx.fill(); ctx.strokeStyle = 'rgba(0,0,0,0.15)'; ctx.stroke();
   if (type === 2){ ctx.fillStyle = '#6b3e1e'; ctx.fillRect(cx - 8, cy - TILE_H*0.4 - 8, 16, TILE_H*0.8 + 16); ctx.fillStyle = '#00000022'; ctx.fillRect(cx + 4, cy - 2, 2, 4); }
 }
@@ -525,6 +607,7 @@ function drawItem(it, cam){
   if (it.type === 'key'){ /* keys removed visually */ }
   else if (it.type === 'pistol'){ ctx.fillStyle = '#bdbdbd'; ctx.fillRect(sx - 8, sy - 6, 16, 6); ctx.fillStyle = '#666'; ctx.fillRect(sx + 6, sy - 4, 6, 4); }
   else if (it.type === 'potion'){ ctx.fillStyle = '#57c6a7'; ctx.beginPath(); ctx.ellipse(sx, sy - 2, 6, 8, 0, 0, Math.PI*2); ctx.fill(); ctx.fillStyle = '#00000022'; ctx.fillRect(sx - 2, sy + 2, 4, 4); }
+  else if (it.type === 'radar'){ ctx.strokeStyle = '#66ff66'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(sx, sy - 2, 10, 0, Math.PI*2); ctx.stroke(); ctx.beginPath(); ctx.arc(sx, sy - 2, 5, 0, Math.PI*2); ctx.stroke(); ctx.fillStyle = '#66ff66'; ctx.beginPath(); ctx.arc(sx, sy - 2, 2, 0, Math.PI*2); ctx.fill(); }
 }
 
 function drawEntity(ent, cam){
@@ -556,16 +639,88 @@ function render(){
   const itemsSorted = items.filter(it=> it.x >= minX && it.x <= maxX && it.y >= minY && it.y <= maxY).slice().sort((a,b)=> (a.x+a.y) - (b.x+b.y)); for (const it of itemsSorted) drawItem(it, cam);
   // entities (visible only)
   const ents = [...enemies.filter(e=>e.alive && e.x >= minX && e.x <= maxX && e.y >= minY && e.y <= maxY), player].sort((a,b)=> (a.x+a.y) - (b.x+b.y)); for (const e of ents) drawEntity(e, cam);
+  // aim arrows when Shift is held
+  if (aimMode){
+    const hasGun = player.weapon && player.weapon.name === 'Pistol' && player.weapon.ammo > 0;
+    const dirs = [
+      {dx:0, dy:-1, label:'↗'},
+      {dx:0, dy:1, label:'↙'},
+      {dx:-1, dy:0, label:'↖'},
+      {dx:1, dy:0, label:'↘'},
+    ];
+    ctx.font = '22px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const d of dirs){
+      const tileIso = iso(player.x + d.dx, player.y + d.dy);
+      const ax = tileIso.x - cam.x, ay = tileIso.y - cam.y;
+      const isSelected = aimDir && aimDir.dx === d.dx && aimDir.dy === d.dy;
+      if (isSelected && !hasGun) ctx.fillStyle = '#ff4444';
+      else if (isSelected) ctx.fillStyle = '#ffd700';
+      else ctx.fillStyle = 'rgba(200,200,200,0.5)';
+      ctx.fillText(d.label, ax, ay);
+    }
+    ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  }
+  // flashing cross when no pistol
+  if (noGunFlashFrames > 0){
+    noGunFlashFrames--;
+    const show = Math.floor(noGunFlashFrames / 12) % 2 === 0;
+    if (show){
+      const pIso = iso(player.x, player.y);
+      const cx = pIso.x - cam.x, cy = pIso.y - cam.y;
+      ctx.fillStyle = '#ff4444'; ctx.font = 'bold 36px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('✕', cx, cy);
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    }
+  }
+  // minimap (radar)
+  if (hasRadar){
+    const mmSize = 120, tilePx = mmSize / MAP_W;
+    const mmX = w - mmSize - 10, mmY = 10;
+    ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(mmX - 2, mmY - 2, mmSize + 4, mmSize + 4);
+    for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++){
+      ctx.fillStyle = map[y][x] === 1 ? '#444' : '#222';
+      ctx.fillRect(mmX + x * tilePx, mmY + y * tilePx, tilePx, tilePx);
+    }
+    for (const e of enemies){ if (!e.alive) continue;
+      ctx.fillStyle = '#ff4444'; ctx.fillRect(mmX + e.x * tilePx + 1, mmY + e.y * tilePx + 1, tilePx - 2, tilePx - 2);
+    }
+    ctx.fillStyle = '#ffd700'; ctx.fillRect(mmX + player.x * tilePx + 1, mmY + player.y * tilePx + 1, tilePx - 2, tilePx - 2);
+    ctx.strokeStyle = '#88ff88'; ctx.lineWidth = 1; ctx.strokeRect(mmX - 2, mmY - 2, mmSize + 4, mmSize + 4);
+  }
   // HUD
   ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(10, h - 130, 520, 120);
   ctx.fillStyle = '#fff'; ctx.font = '13px sans-serif'; const weaponLabel = player.weapon ? `${player.weapon.name}${player.weapon.ammo!==undefined ? ` (ammo:${player.weapon.ammo})` : ''}` : 'None';
-  ctx.fillText(`HP: ${player.hp}/${player.maxHp}   Weapon: ${weaponLabel}`, 18, h - 104);
-  ctx.fillText(`Turn: ${turn}   Enemies: ${enemies.filter(e=>e.alive).length}/${MAX_ACTIVE_ENEMIES}`, 18, h - 84);
+  ctx.fillText(`HP: ${player.hp}/${player.maxHp}   Weapon: ${weaponLabel}${hasRadar ? '   [RADAR]' : ''}`, 18, h - 104);
+  ctx.fillText(`Turn: ${turn}   Enemies: ${enemies.filter(e=>e.alive).length}/${MAX_ACTIVE_ENEMIES}   Level: ${level}`, 18, h - 84);
   const toNext = WAVE_INTERVAL - (playerTurnCounter % WAVE_INTERVAL || WAVE_INTERVAL); ctx.fillText(`Turns: ${playerTurnCounter}   Next wave in: ${toNext}`, 18, h - 64);
-  ctx.fillText('Controls: WASD/Arrows move/attack, H to shoot (pistol), R restart', 18, h - 44);
+  ctx.fillText('Controls: WASD/Arrows move, H/Shift+Arrow shoot (pistol), R restart', 18, h - 44);
   // messages
   if (!player.alive){ ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(w/2 - 200, h/2 - 40, 400, 80); ctx.fillStyle = '#fff'; ctx.font = '22px sans-serif'; ctx.fillText('You died. Press R to restart.', w/2 - 170, h/2); }
-  else if (enemies.filter(e=>e.alive).length === 0){ ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(w/2 - 220, h/2 - 40, 440, 80); ctx.fillStyle = '#fff'; ctx.font = '22px sans-serif'; ctx.fillText('All enemies slain! Press R to restart.', w/2 - 210, h/2); }
+  else if (enemies.filter(e=>e.alive).length === 0){
+    if (!victoryPending){
+      victoryPending = true;
+      setTimeout(nextLevel, 1500);
+    }
+    const cx = w/2, cy = h/2 - 10;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(cx - 240, cy - 55, 480, 110);
+    function drawWreath(x, y, dir){
+      ctx.strokeStyle = '#c4a44a'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(x, y, 28, -Math.PI/2.5, Math.PI/2.5, dir < 0); ctx.stroke();
+      for (let i = 0; i < 6; i++){
+        const t = -Math.PI/2.5 + (i/5) * Math.PI/1.25;
+        const lx = x + 28 * Math.cos(t), ly = y + 28 * Math.sin(t);
+        ctx.beginPath(); ctx.ellipse(lx + dir*6*Math.cos(t), ly + 6*Math.sin(t), 6, 3.5, t + Math.PI/2, 0, Math.PI*2);
+        ctx.fillStyle = '#4a8a3a'; ctx.fill(); ctx.strokeStyle = '#2a5a1a'; ctx.lineWidth = 1; ctx.stroke();
+      }
+    }
+    drawWreath(cx - 75, cy, -1); drawWreath(cx + 75, cy, 1);
+    ctx.fillStyle = '#ffd700'; ctx.font = 'bold 32px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('ПОБЕДА', cx, cy + 10);
+    ctx.fillStyle = '#eee'; ctx.font = '14px sans-serif';
+    ctx.fillText('Уровень ' + (level + 1) + '...', cx, cy + 42);
+    ctx.textAlign = 'left';
+  }
 }
 
 function loop(){ render(); requestAnimationFrame(loop); }
